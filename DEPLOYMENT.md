@@ -24,8 +24,8 @@ In the "Configure Project" screen:
 
 #### ⚠️ **CRITICAL: Set Production Branch**
 - Expand **"Git"** section
-- Set **Production Branch** to: `AI-Chatbot-Next`
-- This ensures only the Next.js branch deploys to production
+- Set **Production Branch** to: `master`
+- This ensures the main branch deploys to production
 
 ### Step 4: Add Environment Variables
 
@@ -63,8 +63,13 @@ Once deployed:
 ## 🔄 Continuous Deployment (Auto-Deploy)
 
 Once connected, Vercel automatically deploys:
-- **Push to `AI-Chatbot-Next`** → Production deployment
+- **Push to `master`** → Production deployment
 - **Push to other branches** → Preview deployments
+
+### Branch Structure
+- **`master`**: Production (Next.js implementation)
+- **`ai-chatbot-react`**: Backup (React implementation)
+- **Other branches**: Preview deployments
 
 ### Managing Deployments
 - **View Deployments**: Vercel Dashboard → Your Project → Deployments
@@ -122,7 +127,7 @@ Once connected, Vercel automatically deploys:
 
 ## ✅ Post-Deployment Checklist
 
-- [ ] Production branch set to `AI-Chatbot-Next`
+- [ ] Production branch set to `master`
 - [ ] All environment variables added
 - [ ] Deployment successful
 - [ ] Document upload works
