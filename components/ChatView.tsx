@@ -176,7 +176,9 @@ export function ChatView() {
                                             : 'bg-muted/50'
                                             }`}
                                     >
-                                        <div className={`prose prose-sm max-w-none prose-headings:font-semibold prose-h3:text-lg prose-p:leading-relaxed ${message.role === 'user' ? 'prose-invert' : 'dark:prose-invert'
+                                        <div className={`prose prose-sm max-w-none prose-headings:font-semibold prose-h3:text-lg prose-p:leading-relaxed ${message.role === 'user'
+                                                ? 'prose-invert dark:prose-headings:text-primary-foreground dark:prose-p:text-primary-foreground dark:prose-strong:text-primary-foreground dark:prose-li:text-primary-foreground'
+                                                : 'dark:prose-invert'
                                             }`}>
                                             <ReactMarkdown
                                                 components={{
@@ -188,7 +190,7 @@ export function ChatView() {
                                                     ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-2 space-y-1" {...props} />,
                                                     li: ({ node, ...props }) => <li className="mb-1" {...props} />,
                                                     strong: ({ node, ...props }) => <strong className="font-bold" {...props} />,
-                                                    a: ({ node, ...props }) => <a className="text-primary hover:underline" target="_blank" rel="noopener noreferrer" {...props} />,
+                                                    a: ({ node, ...props }) => <a className={`${message.role === 'user' ? 'text-primary-foreground/90 hover:text-primary-foreground' : 'text-primary'} hover:underline font-medium decoration-1 underline-offset-2`} target="_blank" rel="noopener noreferrer" {...props} />,
                                                     blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-primary/20 pl-4 italic text-muted-foreground my-2" {...props} />,
                                                     code: ({ node, className, children, ...props }) => {
                                                         const match = /language-(\w+)/.exec(className || '')
