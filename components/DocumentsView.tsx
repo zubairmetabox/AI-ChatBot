@@ -4,6 +4,8 @@ import { useState, useRef, useEffect } from 'react';
 import { Upload, FileText, Trash2, Library, AlertCircle, Loader2 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
+import { Checkbox } from '@/components/ui/checkbox';
 import { cn } from '@/components/ui/utils';
 import {
     AlertDialog,
@@ -28,10 +30,16 @@ export function DocumentsView() {
     const [documents, setDocuments] = useState<Document[]>([]);
     const [isDragging, setIsDragging] = useState(false);
     const [uploading, setUploading] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
+    const [currentFile, setCurrentFile] = useState('');
     const [error, setError] = useState('');
     const [deletingId, setDeletingId] = useState<string | null>(null);
-    const [docToDelete, setDocToDelete] = useState<string | null>(null);
+    const [docsToDelete, setDocsToDelete] = useState<string[] | null>(null);
+    const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
+    const [isDeleting, setIsDeleting] = useState(false);
+    const [deleteProgress, setDeleteProgress] = useState({ current: 0, total: 0 });
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const cancelRef = useRef(false);
 
     useEffect(() => {
         fetchDocuments();
@@ -83,6 +91,17 @@ export function DocumentsView() {
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
+            setCurrentFile(file.name);
+            setUploadProgress(0);
+
+            // Simulate progress since fetch doesn't support it natively
+            const progressInterval = setInterval(() => {
+                setUploadProgress(prev => {
+                    if (prev >= 90) return prev;
+                    return prev + 10;
+                });
+            }, 500);
+
             const formData = new FormData();
             formData.append('file', file);
 
@@ -92,42 +111,94 @@ export function DocumentsView() {
                     body: formData,
                 });
 
+                clearInterval(progressInterval);
+                setUploadProgress(100);
+
                 if (!response.ok) {
                     const data = await response.json();
                     throw new Error(data.error || 'Upload failed');
                 }
+
+                // Add the new document immediately to the list (Optimistic-ish UI)
+                const data = await response.json();
+                if (data.document) {
+                    setDocuments(prev => [
+                        {
+                            id: data.document.id,
+                            filename: data.document.filename,
+                            upload_date: new Date().toISOString(),
+                            chunks: data.document.chunks,
+                            text_length: data.document.textLength,
+                        },
+                        ...prev
+                    ]);
+                }
+
             } catch (err: any) {
+                clearInterval(progressInterval);
                 setError(`Error uploading ${file.name}: ${err.message}`);
+                // Continue with next file even if one fails
             }
         }
 
-        await fetchDocuments();
         setUploading(false);
+        setCurrentFile('');
+        setUploadProgress(0);
     };
 
-    const confirmDelete = async () => {
-        if (!docToDelete) return;
-
-        const id = docToDelete;
-        setDeletingId(id);
-        setDocToDelete(null);
-
-        try {
-            const response = await fetch(`/api/documents/${id}`, {
-                method: 'DELETE',
-            });
-
-            if (response.ok) {
-                setDocuments(prev => prev.filter(doc => doc.id !== id));
-            } else {
-                throw new Error('Delete failed');
-            }
-        } catch (err) {
-            console.error('Error deleting document:', err);
-            setError('Failed to delete document');
-        } finally {
-            setDeletingId(null);
+    const toggleSelection = (id: string) => {
+        const newSelected = new Set(selectedDocs);
+        if (newSelected.has(id)) {
+            newSelected.delete(id);
+        } else {
+            newSelected.add(id);
         }
+        setSelectedDocs(newSelected);
+    };
+
+    const toggleSelectAll = () => {
+        if (selectedDocs.size === documents.length) {
+            setSelectedDocs(new Set());
+        } else {
+            setSelectedDocs(new Set(documents.map(doc => doc.id)));
+        }
+    };
+
+    const startDeleteProcess = async (e: React.MouseEvent) => {
+        e.preventDefault(); // Prevent dialog from closing automatically
+        if (!docsToDelete || docsToDelete.length === 0) return;
+
+        setIsDeleting(true);
+        setDeleteProgress({ current: 0, total: docsToDelete.length });
+        cancelRef.current = false;
+
+        const newSelected = new Set(selectedDocs);
+
+        for (let i = 0; i < docsToDelete.length; i++) {
+            if (cancelRef.current) break;
+
+            const id = docsToDelete[i];
+
+            try {
+                await fetch(`/api/documents/${id}`, { method: 'DELETE' });
+                // Update UI incrementally
+                setDocuments(prev => prev.filter(doc => doc.id !== id));
+                newSelected.delete(id);
+                // Update selected set immediately so if paused/cancelled, UI is correct
+                setSelectedDocs(new Set(newSelected));
+            } catch (err) {
+                console.error(`Failed to delete ${id}`, err);
+            }
+
+            setDeleteProgress(prev => ({ ...prev, current: i + 1 }));
+        }
+
+        setIsDeleting(false);
+        setDocsToDelete(null);
+    };
+
+    const handleCancelDelete = () => {
+        cancelRef.current = true;
     };
 
     const formatNumber = (num: number) => {
@@ -171,6 +242,14 @@ export function DocumentsView() {
                         <p className="text-lg font-medium mb-2">
                             {uploading ? 'Processing documents...' : 'Drop files here or click to browse'}
                         </p>
+                        {uploading && currentFile && (
+                            <div className="w-full max-w-xs space-y-2 mb-4">
+                                <Progress value={uploadProgress} className="h-2" />
+                                <p className="text-xs text-muted-foreground truncate">
+                                    Uploading {currentFile} ({uploadProgress}%)
+                                </p>
+                            </div>
+                        )}
                         <p className="text-sm text-muted-foreground mb-6">Supports PDF, TXT, DOCX (max 10MB)</p>
                         <Button disabled={uploading} variant="secondary">
                             {uploading ? 'Uploading...' : 'Choose Files'}
@@ -195,9 +274,31 @@ export function DocumentsView() {
 
                 <div className="space-y-4">
                     <div className="flex items-center justify-between">
-                        <h2 className="text-xl font-semibold tracking-tight">
-                            Uploaded Documents <span className="text-muted-foreground ml-2 text-base font-normal">({documents.length})</span>
-                        </h2>
+                        <div className="flex items-center gap-3">
+                            <Checkbox
+                                id="select-all"
+                                checked={documents.length > 0 && selectedDocs.size === documents.length}
+                                onCheckedChange={toggleSelectAll}
+                                disabled={documents.length === 0}
+                            />
+                            <div className="flex gap-2 items-center">
+                                <h2 className="text-xl font-semibold tracking-tight">
+                                    Uploaded Documents
+                                </h2>
+                                <span className="text-muted-foreground text-sm font-normal">({documents.length})</span>
+                            </div>
+                        </div>
+                        {selectedDocs.size > 0 && (
+                            <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => setDocsToDelete(Array.from(selectedDocs))}
+                                className="animate-in fade-in zoom-in duration-200"
+                            >
+                                <Trash2 className="w-4 h-4 mr-2" />
+                                Delete Selected ({selectedDocs.size})
+                            </Button>
+                        )}
                     </div>
 
                     {documents.length === 0 ? (
@@ -210,6 +311,13 @@ export function DocumentsView() {
                                 <Card key={doc.id} className="group hover:shadow-md transition-all border-muted hover:border-border">
                                     <CardContent className="p-4">
                                         <div className="flex items-start gap-3">
+                                            <div className="pt-3">
+                                                <Checkbox
+                                                    checked={selectedDocs.has(doc.id)}
+                                                    onCheckedChange={() => toggleSelection(doc.id)}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                />
+                                            </div>
                                             <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
                                                 <FileText className="w-5 h-5 text-primary" />
                                             </div>
@@ -230,7 +338,7 @@ export function DocumentsView() {
                                                 className="opacity-0 group-hover:opacity-100 transition-opacity h-8 w-8 text-muted-foreground hover:text-destructive"
                                                 onClick={(e) => {
                                                     e.stopPropagation();
-                                                    setDocToDelete(doc.id);
+                                                    setDocsToDelete([doc.id]);
                                                 }}
                                                 disabled={deletingId === doc.id}
                                             >
@@ -250,20 +358,50 @@ export function DocumentsView() {
             </div>
 
 
-            <AlertDialog open={!!docToDelete} onOpenChange={(open: boolean) => !open && setDocToDelete(null)}>
+            <AlertDialog open={!!docsToDelete} onOpenChange={(open: boolean) => {
+                if (!open && isDeleting) return; // Prevent closing while deleting
+                if (!open) setDocsToDelete(null);
+            }}>
                 <AlertDialogContent>
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>Are you sure?</AlertDialogTitle>
-                        <AlertDialogDescription>
-                            This will permanently delete the document from your library. This action cannot be undone.
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={confirmDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                            Delete
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
+                    {isDeleting ? (
+                        <>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>Deleting Documents</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                    Please wait while we remove the selected files.
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <div className="py-4 space-y-2">
+                                <Progress value={deleteProgress.total > 0 ? (deleteProgress.current / deleteProgress.total) * 100 : 0} className="h-2" />
+                                <p className="text-sm text-center text-muted-foreground">
+                                    Deleting {deleteProgress.current} of {deleteProgress.total}
+                                </p>
+                            </div>
+                            <AlertDialogFooter>
+                                <Button variant="outline" onClick={handleCancelDelete}>Cancel</Button>
+                            </AlertDialogFooter>
+                        </>
+                    ) : (
+                        <>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>
+                                    {docsToDelete?.length === 1 ? 'Delete Document?' : `Delete ${docsToDelete?.length} Documents?`}
+                                </AlertDialogTitle>
+                                <AlertDialogDescription>
+                                    {docsToDelete?.length === 1
+                                        ? "This will permanently delete the document from your library. This action cannot be undone."
+                                        : "This will permanently delete the selected documents. This action cannot be undone."
+                                    }
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                <AlertDialogAction onClick={startDeleteProcess} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                                    Delete
+                                </AlertDialogAction>
+                            </AlertDialogFooter>
+                        </>
+                    )}
                 </AlertDialogContent>
             </AlertDialog>
         </div >
