@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, BookOpen, Loader2 } from 'lucide-react';
+import { Send, Bot, User, BookOpen, Loader2, Sparkles, AlertTriangle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,17 +17,19 @@ interface Message {
     }>;
 }
 
-const suggestedQuestions = [
-    "How do I create a new project in Zoho Books?",
-    "What are the different billing methods available?",
-    "How can I track time for my tasks?",
-];
+interface ChatViewProps {
+    companyName?: string;
+    logoUrl?: string;
+    logoDarkUrl?: string;
+    faqs?: string[];
+}
 
-export function ChatView() {
+export function ChatView({ companyName = "AI Assistant", logoUrl, logoDarkUrl, faqs = [] }: ChatViewProps) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const [chatError, setChatError] = useState<string | null>(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -35,14 +37,15 @@ export function ChatView() {
 
     useEffect(() => {
         scrollToBottom();
-    }, [messages]);
+    }, [messages, isLoading]);
 
     const handleSend = async () => {
         if (!input.trim() || isLoading) return;
 
-        const userMessage: Message = { role: 'user', content: input };
-        setMessages(prev => [...prev, userMessage]);
+        const userMessage = input.trim();
         setInput('');
+        setChatError(null);
+        setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
         setIsLoading(true);
 
         try {
@@ -50,66 +53,84 @@ export function ChatView() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    message: input,
-                    conversationHistory: messages,
+                    message: userMessage,
+                    conversationHistory: messages.map(m => ({ role: m.role, content: m.content }))
                 }),
             });
 
-            if (!response.ok) throw new Error('Failed to send message');
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to send message');
+            }
 
-            const reader = response.body?.getReader();
+            if (!response.body) throw new Error('No response body');
+
+            // Initialize empty assistant message
+            setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+
+            const reader = response.body.getReader();
             const decoder = new TextDecoder();
-            let assistantMessage: Message = { role: 'assistant', content: '' };
+            let done = false;
+            let currentResponse = '';
 
-            setMessages(prev => [...prev, assistantMessage]);
+            while (!done) {
+                const { value, done: doneReading } = await reader.read();
+                done = doneReading;
+                const chunkValue = decoder.decode(value, { stream: true });
 
-            while (reader) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n');
-
+                // Process SSE chunks
+                const lines = chunkValue.split('\n\n');
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
-                        const dataStr = line.slice(6);
-                        if (dataStr.trim() === '[DONE]') continue;
+                        const dataStr = line.replace('data: ', '').trim();
+                        if (dataStr === '[DONE]') continue;
 
                         try {
                             const data = JSON.parse(dataStr);
+                            if (data.error) throw new Error(data.error);
 
-                            if (data.source) {
-                                // Add sources if present
-                                assistantMessage = {
-                                    ...assistantMessage,
-                                    sources: [...(assistantMessage.sources || []), {
-                                        index: (assistantMessage.sources?.length || 0) + 1,
-                                        filename: data.source.metadata?.filename || 'Unknown',
-                                        chunkIndex: data.source.metadata?.chunk || 0
-                                    }]
-                                };
-                            } else if (data.content) {
-                                assistantMessage.content += data.content;
+                            if (data.content) {
+                                currentResponse += data.content;
+                                setMessages(prev => {
+                                    const newMessages = [...prev];
+                                    const lastMessage = newMessages[newMessages.length - 1];
+                                    if (lastMessage.role === 'assistant') {
+                                        lastMessage.content = currentResponse;
+                                    }
+                                    return newMessages;
+                                });
                             }
 
-                            // Update messages state
-                            setMessages(prev => {
-                                const newMessages = [...prev];
-                                newMessages[newMessages.length - 1] = { ...assistantMessage };
-                                return newMessages;
-                            });
+                            if (data.sources) {
+                                setMessages(prev => {
+                                    const newMessages = [...prev];
+                                    const lastMessage = newMessages[newMessages.length - 1];
+                                    if (lastMessage.role === 'assistant') {
+                                        lastMessage.sources = data.sources;
+                                    }
+                                    return newMessages;
+                                });
+                            }
                         } catch (e) {
                             console.error('Error parsing SSE data:', e);
                         }
                     }
                 }
             }
-        } catch (error) {
-            console.error('Error sending message:', error);
-            setMessages(prev => [
-                ...prev,
-                { role: 'assistant', content: 'Sorry, I encountered an error processing your request.' }
-            ]);
+        } catch (error: any) {
+            console.error('Chat error:', error);
+            setChatError(error.message);
+            // Remove the empty assistant message if it was added but failed immediately
+            setMessages(prev => {
+                if (prev.length > 0 && prev[prev.length - 1].role === 'assistant' && prev[prev.length - 1].content === '') {
+                    return prev.slice(0, -1);
+                }
+                return prev;
+            });
+            setMessages(prev => [...prev, {
+                role: 'assistant',
+                content: "I apologize, but I encountered an error answering your question. Please try again."
+            }]);
         } finally {
             setIsLoading(false);
         }
@@ -121,39 +142,57 @@ export function ChatView() {
         // handleSend();
     };
 
+    // Helper to determine presence
+    const hasLightLogo = !!logoUrl;
+    const hasDarkLogo = !!logoDarkUrl;
+
     return (
         <div className="flex flex-col h-full">
             {messages.length === 0 ? (
                 <div className="flex-1 flex flex-col items-center justify-center p-6 space-y-6">
                     <div className="flex items-center justify-center">
-                        <img
-                            src="https://www.zohowebstatic.com/sites/zweb/images/commonroot/zoho-logo-web.svg"
-                            alt="Zoho"
-                            className="w-32 md:w-48 h-auto opacity-90 dark:hidden"
-                        />
-                        <img
-                            src="https://www.zohowebstatic.com/sites/zweb/images/commonroot/zoho-logo-white.svg"
-                            alt="Zoho"
-                            className="w-32 md:w-48 h-auto opacity-90 hidden dark:block"
-                        />
+                        {hasLightLogo ? (
+                            <>
+                                {/* Light Mode Logo: Visible in light mode, hidden in dark mode IF dark logo exists */}
+                                <img
+                                    src={logoUrl}
+                                    alt="Logo"
+                                    className={`w-32 md:w-48 h-auto object-contain max-h-[120px] animate-in fade-in zoom-in duration-500 ${hasDarkLogo ? 'dark:hidden' : ''}`}
+                                />
+                                {/* Dark Mode Logo: Hidden in light mode, visible in dark mode */}
+                                {hasDarkLogo && (
+                                    <img
+                                        src={logoDarkUrl}
+                                        alt="Logo"
+                                        className="w-32 md:w-48 h-auto object-contain max-h-[120px] animate-in fade-in zoom-in duration-500 hidden dark:block"
+                                    />
+                                )}
+                            </>
+                        ) : (
+                            <div className="bg-primary/10 p-6 rounded-3xl animate-in fade-in zoom-in duration-500">
+                                <Sparkles className="w-16 h-16 text-primary" />
+                            </div>
+                        )}
                     </div>
                     <div className="text-center space-y-2">
-                        <h2 className="text-2xl font-semibold tracking-tight">AI Assistant</h2>
+                        <h2 className="text-2xl font-semibold tracking-tight">{companyName}</h2>
                         <p className="text-muted-foreground">Ask me anything about your documents!</p>
                     </div>
-                    <div className="space-y-3 w-full max-w-sm">
-                        <p className="text-sm text-muted-foreground text-center font-medium">Try asking:</p>
-                        {suggestedQuestions.map((question, index) => (
-                            <Button
-                                key={index}
-                                variant="outline"
-                                className="w-full justify-start text-left h-auto py-3 px-4 hover:bg-muted/50 transition-colors"
-                                onClick={() => handleSuggestionClick(question)}
-                            >
-                                <span className="text-muted-foreground text-sm">{question}</span>
-                            </Button>
-                        ))}
-                    </div>
+                    {faqs.length > 0 && (
+                        <div className="space-y-3 w-full max-w-sm">
+                            <p className="text-sm text-muted-foreground text-center font-medium">Frequently asked questions:</p>
+                            {faqs.map((question, index) => (
+                                <Button
+                                    key={index}
+                                    variant="outline"
+                                    className="w-full justify-start text-left h-auto py-3 px-4 hover:bg-muted/50 transition-colors"
+                                    onClick={() => handleSuggestionClick(question)}
+                                >
+                                    <span className="text-muted-foreground text-sm">{question}</span>
+                                </Button>
+                            ))}
+                        </div>
+                    )}
                 </div>
             ) : (
                 <div className="flex-1 overflow-y-auto p-4 md:p-6 scroll-smooth">
@@ -177,55 +216,53 @@ export function ChatView() {
                                             }`}
                                     >
                                         <div className={`prose prose-sm max-w-none prose-headings:font-semibold prose-h3:text-lg prose-p:leading-relaxed ${message.role === 'user'
-                                                ? 'prose-invert dark:prose-headings:text-primary-foreground dark:prose-p:text-primary-foreground dark:prose-strong:text-primary-foreground dark:prose-li:text-primary-foreground'
-                                                : 'dark:prose-invert'
+                                            ? 'prose-invert dark:prose-headings:text-primary-foreground dark:prose-p:text-primary-foreground dark:prose-strong:text-primary-foreground dark:prose-li:text-primary-foreground'
+                                            : 'dark:prose-headings:text-foreground dark:prose-p:text-foreground dark:prose-strong:text-foreground dark:prose-li:text-foreground'
                                             }`}>
                                             <ReactMarkdown
                                                 components={{
-                                                    h1: ({ node, ...props }) => <h1 className="text-2xl font-bold mt-4 mb-2" {...props} />,
-                                                    h2: ({ node, ...props }) => <h2 className="text-xl font-bold mt-3 mb-2" {...props} />,
-                                                    h3: ({ node, ...props }) => <h3 className="text-lg font-bold mt-2 mb-1" {...props} />,
-                                                    p: ({ node, ...props }) => <p className="mb-2 leading-relaxed" {...props} />,
-                                                    ul: ({ node, ...props }) => <ul className="list-disc pl-5 mb-2 space-y-1" {...props} />,
-                                                    ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-2 space-y-1" {...props} />,
-                                                    li: ({ node, ...props }) => <li className="mb-1" {...props} />,
-                                                    strong: ({ node, ...props }) => <strong className="font-bold" {...props} />,
-                                                    a: ({ node, ...props }) => <a className={`${message.role === 'user' ? 'text-primary-foreground/90 hover:text-primary-foreground' : 'text-primary'} hover:underline font-medium decoration-1 underline-offset-2`} target="_blank" rel="noopener noreferrer" {...props} />,
-                                                    blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-primary/20 pl-4 italic text-muted-foreground my-2" {...props} />,
+                                                    h1: ({ node, ...props }) => <h3 className="text-lg font-bold mb-2" {...props} />,
+                                                    h2: ({ node, ...props }) => <h4 className="text-base font-bold mb-2" {...props} />,
+                                                    h3: ({ node, ...props }) => <strong className="block mb-1" {...props} />,
+                                                    p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+                                                    ul: ({ node, ...props }) => <ul className="list-disc pl-4 mb-2 space-y-1" {...props} />,
+                                                    ol: ({ node, ...props }) => <ol className="list-decimal pl-4 mb-2 space-y-1" {...props} />,
+                                                    li: ({ node, ...props }) => <li className="" {...props} />,
+                                                    strong: ({ node, ...props }) => <span className="font-bold" {...props} />,
+                                                    a: ({ node, ...props }) => <a className="underline hover:opacity-80" target="_blank" rel="noopener noreferrer" {...props} />,
+                                                    blockquote: ({ node, ...props }) => <blockquote className="border-l-2 pl-4 italic opacity-80 my-2" {...props} />,
                                                     code: ({ node, className, children, ...props }) => {
-                                                        const match = /language-(\w+)/.exec(className || '')
+                                                        const match = /language-(\w+)/.exec(className || '');
                                                         return match ? (
-                                                            <div className="rounded-md bg-muted p-2 my-2 overflow-x-auto">
+                                                            <div className="bg-black/10 dark:bg-black/30 rounded p-2 my-2 overflow-x-auto text-xs font-mono">
                                                                 <code className={className} {...props}>
                                                                     {children}
                                                                 </code>
                                                             </div>
                                                         ) : (
-                                                            <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
+                                                            <code className="bg-black/10 dark:bg-black/30 rounded px-1 py-0.5 text-xs font-mono" {...props}>
                                                                 {children}
                                                             </code>
-                                                        )
+                                                        );
                                                     }
                                                 }}
                                             >
                                                 {message.content}
                                             </ReactMarkdown>
                                         </div>
-
-                                        {message.sources && message.sources.length > 0 && (
-                                            <div className="mt-4 pt-3 border-t border-border/50">
-                                                <p className="text-xs font-semibold opacity-70 mb-2">Sources:</p>
-                                                <div className="flex flex-wrap gap-2">
-                                                    {message.sources.map((source, i) => (
-                                                        <div key={i} className="flex items-center gap-1 text-xs bg-black/5 dark:bg-white/10 px-2 py-1 rounded-md border border-transparent hover:border-border/50 transition-colors cursor-pointer" title={source.filename}>
-                                                            <BookOpen className="w-3 h-3" />
-                                                            <span className="truncate max-w-[150px]">{source.filename}</span>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
                                     </Card>
+
+                                    {/* Sources Display */}
+                                    {message.sources && message.sources.length > 0 && (
+                                        <div className="flex flex-wrap gap-2 mt-1 ml-1">
+                                            {message.sources.map((source, i) => (
+                                                <div key={i} className="flex items-center gap-1.5 text-xs bg-muted/50 border px-2 py-1 rounded-md text-muted-foreground hover:bg-muted transition-colors cursor-help" title={`Chunk ${source.chunkIndex}`}>
+                                                    <BookOpen className="w-3 h-3" />
+                                                    <span className="truncate max-w-[150px]">{source.filename}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
 
                                 {message.role === 'user' && (
@@ -248,6 +285,14 @@ export function ChatView() {
                                 </Card>
                             </div>
                         )}
+                        {chatError && (
+                            <div className="flex justify-center my-4">
+                                <div className="bg-destructive/10 text-destructive text-sm px-4 py-2 rounded-lg flex items-center gap-2">
+                                    <AlertTriangle className="w-4 h-4" />
+                                    {chatError}
+                                </div>
+                            </div>
+                        )}
                         <div ref={messagesEndRef} />
                     </div>
                 </div>
@@ -261,12 +306,12 @@ export function ChatView() {
                         onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
                         placeholder="Ask a question about your documents..."
                         className="flex-1 shadow-sm"
-                        disabled={isLoading}
+                        disabled={isLoading || !!chatError} // Disable if critical error
                     />
                     <Button
                         onClick={handleSend}
                         size="icon"
-                        disabled={!input.trim() || isLoading}
+                        disabled={!input.trim() || isLoading || !!chatError}
                         className="shadow-sm"
                     >
                         {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}

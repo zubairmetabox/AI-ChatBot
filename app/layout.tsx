@@ -3,7 +3,7 @@ import './globals.css';
 import { ThemeProvider } from "@/components/theme-provider";
 
 export const metadata: Metadata = {
-    title: 'Zoho AI Assistant',
+    title: 'AI Assistant',
     description: 'AI-powered document Q&A assistant with RAG capabilities',
 };
 

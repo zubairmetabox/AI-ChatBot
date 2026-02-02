@@ -368,6 +368,7 @@ export function DocumentsView() {
                         </div>
                     )}
                 </div>
+                <div className="h-20" />
             </div>
 
 

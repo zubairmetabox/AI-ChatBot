@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { searchSimilarDocuments } from '@/lib/services/vectorStore';
 import { generateStreamingCompletion, Message } from '@/lib/services/cerebrasClient';
+import { supabase } from '@/lib/db/supabase';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -19,10 +20,47 @@ export async function POST(req: NextRequest) {
 
         console.log(`💬 Query: ${message}`);
 
-        // Search for relevant documents (top 10 for better coverage)
+        // 1. Fetch settings from Supabase (FAILSAFE)
+        let settings;
+        try {
+            const { data, error } = await supabase
+                .from('chatbot_settings')
+                .select('value')
+                .eq('key', 'guardrails')
+                .single();
+
+            if (error || !data) {
+                console.warn("Settings fetch failed or empty, using defaults.", error);
+                settings = {}; // Will fall back to defaults below
+            } else {
+                settings = data.value;
+            }
+        } catch (err) {
+            console.error('Settings fetch error, using defaults:', err);
+            settings = {};
+        }
+
+        const defaultSettings = {
+            system_prompt: "You are a helpful AI Assistant. You answer questions based on the provided documents.",
+            competitors: [],
+            messages: {
+                competitor_response: "I cannot answer questions about competitors.",
+                fallback_response: "I don't have that information."
+            },
+            faqs: [
+                "Summarize the key points from the documents",
+                "What are the main risks mentioned?",
+                "Can you help me find specific details?"
+            ]
+        };
+
+        // Merge defaults
+        settings = { ...defaultSettings, ...settings };
+
+        // 2. Search for relevant documents (top 10 for better coverage)
         const relevantDocs = await searchSimilarDocuments(message, 10);
 
-        // Build context from retrieved documents
+        // 3. Build context from retrieved documents
         let context = '';
         if (relevantDocs.length > 0) {
             context = 'Here is relevant information from the documents:\n\n';
@@ -31,47 +69,21 @@ export async function POST(req: NextRequest) {
             });
         }
 
+        // 4. Construct System Prompt
+        const competitorsList = settings.competitors?.join(", ") || "";
+        // Use generic placeholders replacement
+        // Note: The template stored in DB might have {competitors}, {competitor_response}, etc.
+        const systemPromptTemplate = settings.system_prompt || "You are a helpful AI Assistant.";
+
+        const finalSystemPrompt = systemPromptTemplate
+            .replace(/{competitors}/g, competitorsList)
+            .replace(/{competitor_response}/g, settings.messages?.competitor_response || "I cannot answer questions about competitors.")
+            .replace(/{fallback_response}/g, settings.messages?.fallback_response || "I don't have that information.");
+
         // Build messages for LLM
         const systemMessage: Message = {
             role: 'system',
-            content: `You are Zoho AI Assistant. You MUST follow these rules STRICTLY:
-
-🚫 ABSOLUTE PROHIBITIONS - NEVER VIOLATE THESE:
-1. DO NOT provide ANY information about competitors (Odoo, Salesforce, HubSpot, Microsoft Dynamics, SAP, Oracle, NetSuite, Freshworks, Monday.com, etc.)
-2. DO NOT use general knowledge or training data - ONLY use the provided documents
-3. DO NOT create "Alternative Answers" or provide general information when documents don't have the answer
-4. DO NOT discuss, compare, or mention competitor features, pricing, or capabilities
-5. DO NOT list Zoho features when asked about competitors - ONLY use the redirect message below
-
-✅ REQUIRED BEHAVIOR FOR COMPETITOR QUESTIONS:
-When asked about competitors (Odoo, Salesforce, etc.), you MUST respond with EXACTLY this and NOTHING else:
-
-"I don't have information about that in my knowledge base. However, I'd be happy to help you with questions about Zoho products and services! What would you like to know about Zoho?"
-
-DO NOT add Zoho features. DO NOT add notes. DO NOT add sources. JUST the redirect message above.
-
-✅ REQUIRED BEHAVIOR FOR NON-DOCUMENT QUESTIONS:
-When asked about topics NOT in the documents (but not competitors), respond with:
-
-"I don't have that information in the uploaded documents. However, I'd be happy to help you with questions about Zoho! What would you like to know?"
-
-📋 RESPONSE RULES:
-- Documents have relevant info → Answer using ONLY that information + cite sources
-- Asked about competitors → Use EXACT redirect message (no features, no notes)
-- Asked about non-document topics → Say you don't have it + redirect to Zoho
-- NEVER make up information
-- NEVER use training data or general knowledge
-- ALWAYS stay focused on Zoho
-
-📝 FORMATTING (when answering from documents):
-- Use ## for headings
-- Use bullet points (-) for lists
-- Use **bold** for key terms
-- Cite sources as [Source N]
-- Keep paragraphs short (2-3 sentences)
-- Add blank lines between sections
-
-Remember: Competitor questions = EXACT redirect message ONLY. Document questions = Answer with sources. Everything else = Redirect to Zoho.`,
+            content: finalSystemPrompt,
         };
 
         const messages: Message[] = [
