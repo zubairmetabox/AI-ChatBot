@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Save, Plus, X, Shield, AlertTriangle, MessageSquare, RefreshCcw, Palette, ChevronLeft, ChevronRight, FileText, Building, Upload, Link as LinkIcon, Download, HelpCircle } from 'lucide-react';
+import { Save, Plus, X, Shield, AlertTriangle, MessageSquare, RefreshCcw, Palette, ChevronLeft, ChevronRight, FileText, Building, Upload, Link as LinkIcon, Download, HelpCircle, Activity, Zap, BarChart3, Cloud } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -25,6 +25,9 @@ interface SettingsState {
         logo_dark_url: string;
     };
     faqs: string[];
+    model_config?: {
+        model: string;
+    };
 }
 
 const DEFAULT_SETTINGS: SettingsState = {
@@ -39,10 +42,27 @@ const DEFAULT_SETTINGS: SettingsState = {
         logo_url: "",
         logo_dark_url: ""
     },
-    faqs: []
+    faqs: [],
+    model_config: {
+        model: "llama-3.3-70b"
+    }
 };
 
-type Tab = 'guardrails' | 'documents' | 'branding';
+const AVAILABLE_MODELS = [
+    { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', desc: 'Production - Balanced Performance' },
+    { id: 'llama3.1-8b', name: 'Llama 3.1 8B', desc: 'Production - Fast & Lightweight' },
+    { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', desc: 'Production - High Capability' },
+    { id: 'qwen-3-32b', name: 'Qwen 3 32B', desc: 'Production - Multilingual' },
+];
+
+interface UsageStats {
+    today_tokens: number;
+    today_requests: number;
+    total_tokens: number;
+    total_requests: number;
+}
+
+type Tab = 'guardrails' | 'documents' | 'branding' | 'models';
 
 // Extracted Component to prevent re-mounting on state changes
 const LogoInputSection = ({
@@ -136,7 +156,7 @@ const LogoInputSection = ({
     </div>
 );
 
-export function SettingsView() {
+export function SettingsView({ isActive = false }: { isActive?: boolean }) {
     // Layout State
     const [activeTab, setActiveTab] = useState<Tab>('documents');
     const [collapsed, setCollapsed] = useState(true);
@@ -149,18 +169,32 @@ export function SettingsView() {
     const [newFaq, setNewFaq] = useState('');
     const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
+    // Usage State
+    const [usage, setUsage] = useState<UsageStats | null>(null);
+    const [loadingUsage, setLoadingUsage] = useState(false);
+
     // URL Import State
     const [lightLogoUrl, setLightLogoUrl] = useState('');
     const [darkLogoUrl, setDarkLogoUrl] = useState('');
     const [isImportingLight, setIsImportingLight] = useState(false);
     const [isImportingDark, setIsImportingDark] = useState(false);
 
+    // Initial Fetch
     useEffect(() => {
         fetchSettings();
-        if (window.innerWidth >= 768) {
-            setCollapsed(false);
+        if (isActive) {
+            fetchUsage();
         }
     }, []);
+
+    // Re-fetch usage when tab becomes active or polling
+    useEffect(() => {
+        if (isActive) {
+            fetchUsage();
+            const interval = setInterval(fetchUsage, 5000); // Poll every 5 seconds while active
+            return () => clearInterval(interval);
+        }
+    }, [isActive]);
 
     const fetchSettings = async () => {
         try {
@@ -170,7 +204,9 @@ export function SettingsView() {
                 setSettings(prev => ({
                     ...prev,
                     ...data,
-                    messages: { ...prev.messages, ...data.messages }
+                    // Ensure nested specific merge if needed
+                    messages: { ...prev.messages, ...data.messages },
+                    model_config: data.model_config || prev.model_config // Use separate key if available or flat
                 }));
             }
         } catch (error) {
@@ -179,6 +215,21 @@ export function SettingsView() {
             setIsLoading(false);
         }
     };
+
+    const fetchUsage = async () => {
+        setLoadingUsage(true);
+        try {
+            const res = await fetch('/api/usage');
+            if (res.ok) {
+                const data = await res.json();
+                setUsage(data);
+            }
+        } catch (e) {
+            console.error("Failed to fetch usage", e);
+        } finally {
+            setLoadingUsage(false);
+        }
+    }
 
     const handleSave = async () => {
         setIsSaving(true);
@@ -274,6 +325,13 @@ export function SettingsView() {
         }));
     };
 
+    // Calculate Percentages
+    const tokenLimit = 1000000;
+    const requestLimit = 14400;
+
+    const tokenPercent = usage ? Math.min(100, (usage.today_tokens / tokenLimit) * 100) : 0;
+    const requestPercent = usage ? Math.min(100, (usage.today_requests / requestLimit) * 100) : 0;
+
     return (
         <div className="flex h-full bg-muted/10 relative overflow-hidden">
             {/* Mobile Backdrop */}
@@ -341,6 +399,19 @@ export function SettingsView() {
                     >
                         <Building className="w-4 h-4 flex-shrink-0" />
                         {!collapsed && <span>Branding</span>}
+                    </Button>
+
+                    <Button
+                        variant={activeTab === 'models' ? "default" : "ghost"}
+                        onClick={() => { setActiveTab('models'); if (window.innerWidth < 768) setCollapsed(true); }}
+                        className={cn(
+                            "w-full justify-start gap-2 h-10",
+                            collapsed ? "justify-center px-0" : "px-4"
+                        )}
+                        title="Model & Usage"
+                    >
+                        <Activity className="w-4 h-4 flex-shrink-0" />
+                        {!collapsed && <span>Model & Usage</span>}
                     </Button>
                 </div>
             </div>
@@ -589,6 +660,144 @@ export function SettingsView() {
                                     />
                                 </CardContent>
                             </Card>
+                        </div>
+                    </div>
+
+                    {/* Model & Usage Content */}
+                    <div className={activeTab === 'models' ? 'block' : 'hidden'}>
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+                            <div>
+                                <h1 className="text-3xl font-bold tracking-tight">Model & Usage</h1>
+                                <p className="text-muted-foreground mt-2">Manage AI model selection and track your API usage.</p>
+                            </div>
+                            <Button onClick={handleSave} disabled={isSaving} className="gap-2 w-full md:w-auto min-w-[120px]">
+                                {isSaving ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                                {isSaving ? 'Saving...' : 'Save Changes'}
+                            </Button>
+                        </div>
+
+                        {saveStatus === 'success' && (
+                            <div className="bg-green-100 dark:bg-green-900/20 text-green-700 dark:text-green-300 p-4 rounded-lg flex items-center gap-2 mb-6 animate-in fade-in slide-in-from-top-2">
+                                <Shield className="w-5 h-5" />
+                                Settings saved successfully! Reloading...
+                            </div>
+                        )}
+
+                        <div className="grid gap-6">
+                            {/* Model Selection */}
+                            <Card>
+                                <CardHeader>
+                                    <CardTitle className="flex items-center gap-2">
+                                        <Zap className="w-5 h-5 text-primary" />
+                                        Model Selection
+                                    </CardTitle>
+                                    <CardDescription>
+                                        Choose the AI model powered by Cerebras Inference.
+                                    </CardDescription>
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="grid gap-4">
+                                        {AVAILABLE_MODELS.map((model) => (
+                                            <div
+                                                key={model.id}
+                                                className={cn(
+                                                    "flex items-center justify-between p-4 rounded-lg border cursor-pointer transition-all",
+                                                    settings.model_config?.model === model.id
+                                                        ? "border-primary bg-primary/5 shadow-sm"
+                                                        : "hover:border-primary/50"
+                                                )}
+                                                onClick={() => setSettings(s => ({
+                                                    ...s,
+                                                    model_config: { ...s.model_config, model: model.id }
+                                                }))}
+                                            >
+                                                <div>
+                                                    <h3 className="font-medium text-sm">{model.name}</h3>
+                                                    <p className="text-xs text-muted-foreground">{model.desc}</p>
+                                                </div>
+                                                <div className={cn(
+                                                    "w-4 h-4 rounded-full border-2 flex items-center justify-center",
+                                                    settings.model_config?.model === model.id
+                                                        ? "border-primary"
+                                                        : "border-muted-foreground/30"
+                                                )}>
+                                                    {settings.model_config?.model === model.id && (
+                                                        <div className="w-2 h-2 rounded-full bg-primary" />
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </CardContent>
+                            </Card>
+
+                            {/* Usage Stats */}
+                            <Card>
+                                <CardHeader>
+                                    <CardTitle className="flex items-center gap-2">
+                                        <BarChart3 className="w-5 h-5 text-primary" />
+                                        Usage Statistics
+                                    </CardTitle>
+                                    <CardDescription>
+                                        Track your API consumption against daily quotas.
+                                    </CardDescription>
+                                </CardHeader>
+                                <CardContent className="space-y-6">
+                                    {loadingUsage && !usage ? (
+                                        <div className="flex items-center justify-center py-8 text-muted-foreground">
+                                            <RefreshCcw className="w-6 h-6 animate-spin" />
+                                        </div>
+                                    ) : (
+                                        <>
+                                            {/* Daily Tokens */}
+                                            <div className="space-y-2">
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="font-medium">Daily Token Usage</span>
+                                                    <span className="text-muted-foreground">{usage?.today_tokens.toLocaleString() || 0} / 1,000,000</span>
+                                                </div>
+                                                <div className="h-2 w-full bg-secondary rounded-full overflow-hidden">
+                                                    <div
+                                                        className={cn("h-full bg-primary transition-all duration-500", tokenPercent > 90 && "bg-destructive")}
+                                                        style={{ width: `${tokenPercent}%` }}
+                                                    />
+                                                </div>
+                                                <p className="text-xs text-muted-foreground pt-1">
+                                                    Resets daily at 00:00 UTC.
+                                                </p>
+                                            </div>
+
+                                            {/* Daily Requests */}
+                                            <div className="space-y-2">
+                                                <div className="flex justify-between text-sm">
+                                                    <span className="font-medium">Daily Requests</span>
+                                                    <span className="text-muted-foreground">{usage?.today_requests.toLocaleString() || 0} / 14,400</span>
+                                                </div>
+                                                <div className="h-2 w-full bg-secondary rounded-full overflow-hidden">
+                                                    <div
+                                                        className={cn("h-full bg-blue-500 transition-all duration-500", requestPercent > 90 && "bg-destructive")}
+                                                        style={{ width: `${requestPercent}%` }}
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <Separator />
+
+                                            {/* Lifetime Stats */}
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="p-4 bg-muted/20 rounded-lg border">
+                                                    <p className="text-xs text-muted-foreground uppercase font-semibold">Total Lifetime Tokens</p>
+                                                    <p className="text-2xl font-bold mt-1">{usage?.total_tokens.toLocaleString() || 0}</p>
+                                                </div>
+                                                <div className="p-4 bg-muted/20 rounded-lg border">
+                                                    <p className="text-xs text-muted-foreground uppercase font-semibold">Total Lifetime Requests</p>
+                                                    <p className="text-2xl font-bold mt-1">{usage?.total_requests.toLocaleString() || 0}</p>
+                                                </div>
+                                            </div>
+                                        </>
+                                    )}
+                                </CardContent>
+                            </Card>
+                            <div className="h-20" />
                         </div>
                     </div>
 

@@ -16,14 +16,14 @@ export interface Message {
  * @param messages - Array of message objects
  * @returns Streaming response
  */
-export async function generateStreamingCompletion(messages: Message[]) {
+export async function generateStreamingCompletion(messages: Message[], model: string = 'llama-3.3-70b') {
     try {
         const stream = await cerebras.chat.completions.create({
-            model: 'llama-3.3-70b',
+            model,
             messages,
             stream: true,
             temperature: 0.7,
-            max_tokens: 1024,
+            max_tokens: 8192,
         });
 
         return stream;

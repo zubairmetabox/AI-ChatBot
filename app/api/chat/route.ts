@@ -21,19 +21,24 @@ export async function POST(req: NextRequest) {
         console.log(`💬 Query: ${message}`);
 
         // 1. Fetch settings from Supabase (FAILSAFE)
-        let settings;
+        let settings: any = {};
         try {
-            const { data, error } = await supabase
+            const { data: rows, error } = await supabase
                 .from('chatbot_settings')
-                .select('value')
-                .eq('key', 'guardrails')
-                .single();
+                .select('key, value')
+                .in('key', ['guardrails', 'model_config']);
 
-            if (error || !data) {
+            if (error || !rows) {
                 console.warn("Settings fetch failed or empty, using defaults.", error);
-                settings = {}; // Will fall back to defaults below
             } else {
-                settings = data.value;
+                // Merge all settings into one object
+                // We spread the values so 'system_prompt' is top-level (from guardrails)
+                // We also keep the key for explicit access like settings.model_config
+                settings = rows.reduce((acc, row) => ({
+                    ...acc,
+                    ...row.value, // Spread content (e.g. system_prompt, competitors)
+                    [row.key]: row.value // Keep namespaced access (e.g. settings.model_config)
+                }), {});
             }
         } catch (err) {
             console.error('Settings fetch error, using defaults:', err);
@@ -58,7 +63,12 @@ export async function POST(req: NextRequest) {
         settings = { ...defaultSettings, ...settings };
 
         // 2. Search for relevant documents (top 10 for better coverage)
-        const relevantDocs = await searchSimilarDocuments(message, 10);
+        // Enhance query with context if missing to improve retrieval
+        const searchQuery = message.toLowerCase().includes('zoho')
+            ? message
+            : `${message} Zoho Books`;
+
+        const relevantDocs = await searchSimilarDocuments(searchQuery, 10);
 
         // 3. Build context from retrieved documents
         let context = '';
@@ -99,18 +109,104 @@ export async function POST(req: NextRequest) {
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
             async start(controller) {
+                let tokensOut = 0;
+                const tokensIn = Math.ceil(JSON.stringify(messages).length / 4);
+
                 try {
+                    // Get model from settings or default
+                    const model = (settings.model_config as any)?.model || 'llama-3.3-70b';
+                    console.log(`🤖 Model: ${model}`);
+
                     // Get streaming response from Cerebras
-                    const aiStream = await generateStreamingCompletion(messages);
+                    const aiStream = await generateStreamingCompletion(messages, model);
+
+                    let isThinking = false;
+                    let internalBuffer = '';
+                    const THINK_START = '<think>';
+                    const THINK_END = '</think>';
 
                     // Stream the response
                     for await (const chunk of aiStream) {
                         const content = chunk.choices[0]?.delta?.content || '';
+
                         if (content) {
-                            const data = JSON.stringify({ content });
-                            controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                            // Count tokens for ALL generated content (user pays for thoughts)
+                            tokensOut += Math.ceil(content.length / 4);
+
+                            internalBuffer += content;
+
+                            // Process buffer
+                            while (true) {
+                                if (isThinking) {
+                                    // Look for end tag
+                                    const endIdx = internalBuffer.indexOf(THINK_END);
+                                    if (endIdx !== -1) {
+                                        isThinking = false;
+                                        // Discard thought, keep output after it
+                                        internalBuffer = internalBuffer.substring(endIdx + THINK_END.length);
+                                        // Loop again to process potential legitimate text or new think block
+                                        continue;
+                                    } else {
+                                        // No end tag yet. 
+                                        // Discard content but keep enough tail to detect a partial end tag.
+                                        // </think> is 8 chars. Keep last 7 chars.
+                                        if (internalBuffer.length > THINK_END.length) {
+                                            internalBuffer = internalBuffer.slice(-THINK_END.length);
+                                        }
+                                        break; // Need more chunks
+                                    }
+                                } else {
+                                    // Look for start tag
+                                    const startIdx = internalBuffer.indexOf(THINK_START);
+                                    if (startIdx !== -1) {
+                                        // Emit everything BEFORE start tag
+                                        if (startIdx > 0) {
+                                            const validContent = internalBuffer.substring(0, startIdx);
+                                            const data = JSON.stringify({ content: validContent });
+                                            controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                                        }
+                                        isThinking = true;
+                                        internalBuffer = internalBuffer.substring(startIdx + THINK_START.length);
+                                        continue; // Loop to check for immediate end tag
+                                    } else {
+                                        // No start tag found.
+                                        // Emit content, but keep tail to handle split start tag.
+                                        // <think> is 7 chars. Keep last 6.
+                                        const keepLen = THINK_START.length;
+                                        if (internalBuffer.length > keepLen) {
+                                            const emitLen = internalBuffer.length - keepLen;
+                                            const validContent = internalBuffer.substring(0, emitLen);
+                                            const data = JSON.stringify({ content: validContent });
+                                            controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                                            internalBuffer = internalBuffer.substring(emitLen);
+                                        }
+                                        break; // Need more chunks
+                                    }
+                                }
+                            }
                         }
                     }
+
+                    // Flush remaining buffer at end of stream
+                    if (internalBuffer && !isThinking) {
+                        const data = JSON.stringify({ content: internalBuffer });
+                        controller.enqueue(encoder.encode(`data: ${data}\n\n`));
+                    }
+
+                    // Log usage to Supabase (Fire and forget, or await)
+                    // We await it to ensure it's logged before we close, though it delays "DONE" slightly.
+                    // Given it's a fast insert, it's fine.
+                    try {
+                        await supabase.from('usage_logs').insert({
+                            model: model,
+                            tokens_in: tokensIn,
+                            tokens_out: tokensOut
+                        });
+                    } catch (logError) {
+                        console.error('Failed to log usage:', logError);
+                    }
+
+                    // Send sources at the end
 
                     // Send sources at the end
                     if (relevantDocs.length > 0) {

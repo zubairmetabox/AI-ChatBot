@@ -162,7 +162,7 @@ export default function Home() {
                         />
                     </div>
                     <div className={currentView === 'settings' ? 'block h-full' : 'hidden'}>
-                        <SettingsView />
+                        <SettingsView isActive={currentView === 'settings'} />
                     </div>
                 </div>
             </main>
